@@ -19,3 +19,12 @@ fn nominal_ceiling_is_required() {
     let error = serde_json::from_str::<RuntimeConfig>("{}").unwrap_err();
     assert!(error.to_string().contains("required"));
 }
+
+#[test]
+fn unknown_factor_name_is_rejected() {
+    let error = serde_json::from_str::<RuntimeConfig>(
+        r#"{"required":{"nominal_ceiling_bps":200000000.0},"factors":{"retransmision":{"enabled":true,"min_delta":1}}}"#,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown field"));
+}

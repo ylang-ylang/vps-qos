@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::error::Error;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use vps_bandwidth_observer::collector::{ProcCollector, RawCounters};
+use vps_bandwidth_observer::collector::{self, AuxiliaryMeasurements, ProcCollector, RawCounters};
 use vps_bandwidth_observer::config::RuntimeConfig;
 use vps_bandwidth_observer::estimator::{Extremum, WindowedExtremum};
 use vps_bandwidth_observer::factors;
@@ -41,10 +41,19 @@ fn run() -> Result<(), Box<dyn Error>> {
     let congestion = &config.congestion_detection;
     let nominal_ceiling_bps = config.required.nominal_ceiling_bps;
     let mut state = restore_or_create(&config)?;
-    let mut collector = ProcCollector::new(&window.proc_root, &window.interface);
+    let history_limit = config
+        .factors
+        .rate_stability
+        .window_ticks
+        .max(config.factors.rate_slope_zero.window_ticks);
+    let mut collector =
+        ProcCollector::with_history_limit(&window.proc_root, &window.interface, history_limit);
     let mut down_congestion = CongestionKalman::new(congestion.kalman.clone())?;
     let mut up_congestion = CongestionKalman::new(congestion.kalman.clone())?;
-    let factor_registry = factors::all_factors();
+    // Directional registries are separate because baseline-bearing factors
+    // must not mix RX and TX history.
+    let mut down_factors = factors::all_factors(&config.factors);
+    let mut up_factors = factors::all_factors(&config.factors);
     let interval = Duration::from_secs_f64(window.sample_interval_seconds);
 
     loop {
@@ -53,26 +62,31 @@ fn run() -> Result<(), Box<dyn Error>> {
         if let Some(sample) = collector.sample(timestamp)? {
             let window_max_down_bps = state.down_max.feed(sample.down_bps, sample.timestamp)?;
             let window_max_up_bps = state.up_max.feed(sample.up_bps, sample.timestamp)?;
+            let auxiliary = collect_auxiliary(&config);
             let reports_down = previous_counters
                 .as_ref()
                 .map(|previous| {
-                    factors::observe_all(
-                        &factor_registry,
+                    let input = factors::FactorInput {
                         previous,
-                        &sample.counters,
-                        sample.down_bps,
-                    )
+                        current: &sample.counters,
+                        value_bps: sample.down_bps,
+                        rate_history_bps: &sample.down_history_bps,
+                        auxiliary: &auxiliary,
+                    };
+                    factors::observe_all(&mut down_factors, &input)
                 })
                 .unwrap_or_default();
             let reports_up = previous_counters
                 .as_ref()
                 .map(|previous| {
-                    factors::observe_all(
-                        &factor_registry,
+                    let input = factors::FactorInput {
                         previous,
-                        &sample.counters,
-                        sample.up_bps,
-                    )
+                        current: &sample.counters,
+                        value_bps: sample.up_bps,
+                        rate_history_bps: &sample.up_history_bps,
+                        auxiliary: &auxiliary,
+                    };
+                    factors::observe_all(&mut up_factors, &input)
                 })
                 .unwrap_or_default();
             let congestion_down =
@@ -108,6 +122,31 @@ fn run() -> Result<(), Box<dyn Error>> {
             state.save_atomic(&window.state_path)?;
         }
         thread::sleep(interval);
+    }
+}
+
+fn collect_auxiliary(config: &RuntimeConfig) -> AuxiliaryMeasurements {
+    let needs_rtt = config.factors.rtt_inflation.enabled || config.factors.rtt_jitter.enabled;
+    AuxiliaryMeasurements {
+        rtt_ms: needs_rtt
+            .then(|| collector::collect_fping(&config.factors.rtt_inflation.fping_targets))
+            .flatten(),
+        average_cwnd: config
+            .factors
+            .cwnd_shrink
+            .enabled
+            .then(collector::collect_average_cwnd)
+            .flatten(),
+        haproxy_conn_cur: config
+            .factors
+            .conn_up_throughput_flat
+            .enabled
+            .then(|| {
+                collector::collect_haproxy_conn_cur(
+                    &config.factors.conn_up_throughput_flat.haproxy_socket,
+                )
+            })
+            .flatten(),
     }
 }
 

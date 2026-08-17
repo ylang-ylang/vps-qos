@@ -1,8 +1,11 @@
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::io;
-use std::path::PathBuf;
+use std::io::{self, Read, Write};
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const BITS_PER_BYTE: f64 = 8.0;
 
@@ -16,11 +19,20 @@ pub struct RawCounters {
     pub from_zero_window_advertisements: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AuxiliaryMeasurements {
+    pub rtt_ms: Option<Vec<f64>>,
+    pub average_cwnd: Option<f64>,
+    pub haproxy_conn_cur: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RateSample {
     pub timestamp: f64,
     pub down_bps: f64,
     pub up_bps: f64,
+    pub down_history_bps: Vec<f64>,
+    pub up_history_bps: Vec<f64>,
     pub counters: RawCounters,
 }
 
@@ -29,18 +41,31 @@ pub struct ProcCollector {
     proc_root: PathBuf,
     interface: String,
     previous: Option<(f64, RawCounters)>,
+    history_limit: usize,
+    down_history_bps: VecDeque<f64>,
+    up_history_bps: VecDeque<f64>,
 }
 
 impl ProcCollector {
     pub fn new(proc_root: impl Into<PathBuf>, interface: impl Into<String>) -> Self {
+        Self::with_history_limit(proc_root, interface, 2)
+    }
+
+    pub fn with_history_limit(
+        proc_root: impl Into<PathBuf>,
+        interface: impl Into<String>,
+        history_limit: usize,
+    ) -> Self {
         Self {
             proc_root: proc_root.into(),
             interface: interface.into(),
             previous: None,
+            history_limit: history_limit.max(2),
+            down_history_bps: VecDeque::new(),
+            up_history_bps: VecDeque::new(),
         }
     }
 
-    /// Reads cumulative kernel counters without applying policy or thresholds.
     pub fn read_counters(&self) -> Result<RawCounters, CollectorError> {
         let (rx_bytes, tx_bytes) = parse_net_dev(
             &fs::read_to_string(self.proc_root.join("net/dev")).map_err(CollectorError::Read)?,
@@ -55,7 +80,6 @@ impl ProcCollector {
                 .map_err(CollectorError::Read)?,
             "TcpExt",
         )?;
-
         Ok(RawCounters {
             rx_bytes,
             tx_bytes,
@@ -70,8 +94,6 @@ impl ProcCollector {
         self.previous.as_ref().map(|(_, counters)| counters)
     }
 
-    /// Produces rates only after two snapshots. Counter resets yield a zero
-    /// delta rather than wrapping to an enormous synthetic sample.
     pub fn sample(&mut self, timestamp: f64) -> Result<Option<RateSample>, CollectorError> {
         if !timestamp.is_finite() {
             return Err(CollectorError::InvalidTimestamp);
@@ -82,12 +104,18 @@ impl ProcCollector {
             if elapsed <= 0.0 {
                 return Err(CollectorError::NonIncreasingTimestamp);
             }
+            let down_bps =
+                counter_delta(current.rx_bytes, previous.rx_bytes) as f64 * BITS_PER_BYTE / elapsed;
+            let up_bps =
+                counter_delta(current.tx_bytes, previous.tx_bytes) as f64 * BITS_PER_BYTE / elapsed;
+            push_bounded(&mut self.down_history_bps, down_bps, self.history_limit);
+            push_bounded(&mut self.up_history_bps, up_bps, self.history_limit);
             Some(RateSample {
                 timestamp,
-                down_bps: counter_delta(current.rx_bytes, previous.rx_bytes) as f64 * BITS_PER_BYTE
-                    / elapsed,
-                up_bps: counter_delta(current.tx_bytes, previous.tx_bytes) as f64 * BITS_PER_BYTE
-                    / elapsed,
+                down_bps,
+                up_bps,
+                down_history_bps: self.down_history_bps.iter().copied().collect(),
+                up_history_bps: self.up_history_bps.iter().copied().collect(),
                 counters: current.clone(),
             })
         } else {
@@ -98,10 +126,85 @@ impl ProcCollector {
     }
 }
 
+fn push_bounded(history: &mut VecDeque<f64>, value: f64, limit: usize) {
+    history.push_back(value);
+    while history.len() > limit {
+        history.pop_front();
+    }
+}
+
+/// Best-effort RTT collection. A missing/non-zero `fping` produces `None`.
+pub fn collect_fping(targets: &[String]) -> Option<Vec<f64>> {
+    if targets.is_empty() {
+        return None;
+    }
+    let output = Command::new("fping")
+        .args(["-C", "3", "-q"])
+        .args(targets)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stderr);
+    let samples = parse_fping_output(&text);
+    (!samples.is_empty()).then_some(samples)
+}
+
+/// Best-effort average congestion-window collection from `ss -ti`.
+pub fn collect_average_cwnd() -> Option<f64> {
+    let output = Command::new("ss").args(["-tiH"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_average_cwnd(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Best-effort HAProxy `show stat` query. Socket and parse failures are `None`.
+pub fn collect_haproxy_conn_cur(socket: &Path) -> Option<u64> {
+    let mut stream = UnixStream::connect(socket).ok()?;
+    stream.write_all(b"show stat\n").ok()?;
+    stream.shutdown(Shutdown::Write).ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    parse_haproxy_conn_cur(&response)
+}
+
+pub fn parse_fping_output(output: &str) -> Vec<f64> {
+    output
+        .lines()
+        .filter_map(|line| line.split_once(':').map(|(_, values)| values))
+        .flat_map(str::split_whitespace)
+        .filter_map(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .collect()
+}
+
+pub fn parse_average_cwnd(output: &str) -> Option<f64> {
+    let values: Vec<f64> = output
+        .split_whitespace()
+        .filter_map(|token| token.strip_prefix("cwnd:")?.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .collect();
+    (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64)
+}
+
+pub fn parse_haproxy_conn_cur(output: &str) -> Option<u64> {
+    let mut lines = output.lines();
+    let header = lines.next()?.trim_start_matches("# ");
+    let columns: Vec<&str> = header.split(',').collect();
+    let scur_index = columns.iter().position(|column| *column == "scur")?;
+    let service_index = columns.iter().position(|column| *column == "svname")?;
+    let frontend_values: Vec<u64> = lines
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(',').collect();
+            (fields.get(service_index) == Some(&"FRONTEND"))
+                .then(|| fields.get(scur_index)?.parse::<u64>().ok())?
+        })
+        .collect();
+    (!frontend_values.is_empty()).then(|| frontend_values.into_iter().sum())
+}
+
 fn counter_delta(current: u64, previous: u64) -> u64 {
     current.saturating_sub(previous)
 }
-
 fn parse_net_dev(contents: &str, interface: &str) -> Result<(u64, u64), CollectorError> {
     for line in contents.lines() {
         let Some((name, values)) = line.split_once(':') else {
@@ -123,7 +226,6 @@ fn parse_net_dev(contents: &str, interface: &str) -> Result<(u64, u64), Collecto
     }
     Err(CollectorError::Missing(format!("interface {interface}")))
 }
-
 fn parse_protocol_table(
     contents: &str,
     protocol: &str,
@@ -142,23 +244,21 @@ fn parse_protocol_table(
                 "protocol {protocol} value row has the wrong prefix"
             )));
         }
-        let header_fields = headers.split_whitespace().skip(1);
-        let value_fields: Vec<&str> = values.split_whitespace().skip(1).collect();
-        let headers: Vec<&str> = header_fields.collect();
-        if headers.len() != value_fields.len() {
+        let headers: Vec<&str> = headers.split_whitespace().skip(1).collect();
+        let values: Vec<&str> = values.split_whitespace().skip(1).collect();
+        if headers.len() != values.len() {
             return Err(CollectorError::Malformed(format!(
                 "protocol {protocol} header/value count differs"
             )));
         }
         return Ok(headers
             .into_iter()
-            .zip(value_fields)
+            .zip(values)
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
             .collect());
     }
     Err(CollectorError::Missing(format!("protocol {protocol}")))
 }
-
 fn field(
     fields: &HashMap<String, String>,
     name: &str,
@@ -169,7 +269,6 @@ fn field(
         .ok_or_else(|| CollectorError::Missing(format!("{protocol}.{name}")))
         .and_then(|value| parse_counter(value, protocol))
 }
-
 fn parse_counter(value: &str, context: &str) -> Result<u64, CollectorError> {
     value
         .parse()
@@ -184,7 +283,6 @@ pub enum CollectorError {
     InvalidTimestamp,
     NonIncreasingTimestamp,
 }
-
 impl std::fmt::Display for CollectorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -196,5 +294,4 @@ impl std::fmt::Display for CollectorError {
         }
     }
 }
-
 impl std::error::Error for CollectorError {}

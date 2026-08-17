@@ -64,6 +64,8 @@ Run with `vps-bandwidth-observer [CONFIG_PATH]`; the default path is
 - `windowed_max_filter`: optional observer, procfs, state, and sampling
   overrides.
 - `congestion_detection`: optional policy threshold and Kalman overrides.
+- `factors`: per-factor enable switches and trigger parameters. Unknown factor
+  names or fields are rejected so spelling errors cannot silently disable a signal.
 - `_comment`: operator-facing documentation; ignored by runtime behavior.
 
 Every operational parameter is externalized:
@@ -87,6 +89,27 @@ Every operational parameter is externalized:
 | `congestion_detection.kalman.initial_state` | 0 | Initial congestion state. |
 | `congestion_detection.kalman.initial_covariance` | 1 | Initial state uncertainty. |
 
+### Factor data sources and deployment requirements
+
+| Factor | Default | Data source | Requirement |
+|---|---|---|---|
+| `retransmission` | enabled | `/proc/net/snmp` `RetransSegs` delta | Host procfs mount |
+| `timeout` | enabled | `/proc/net/netstat` `TCPTimeouts` delta | Host procfs mount |
+| `zero_window` | enabled | `/proc/net/netstat` zero-window deltas | Host procfs mount |
+| `rate_stability` | disabled | configured-length RX/TX rate history | Host procfs mount |
+| `rate_slope_zero` | disabled | normalized linear-regression slope of rate history | Host procfs mount |
+| `rtt_inflation` | disabled | `fping -C 3` samples and rolling baseline | `fping`, network access, normally `NET_RAW` |
+| `rtt_jitter` | disabled | coefficient of variation of the same `fping` samples | `fping`, network access, normally `NET_RAW` |
+| `cwnd_shrink` | disabled | average `cwnd:` parsed from `ss -tiH` | `iproute2` (`ss`), host network namespace |
+| `conn_up_throughput_flat` | disabled | HAProxy `show stat` `scur` total plus rate history | HAProxy admin Unix socket mount |
+
+The image includes `fping` and `iproute2`. Optional collectors are best-effort:
+missing tools, inaccessible sockets, or unparseable output produce no factor
+observation rather than terminating the observer. Enable or disable a factor
+with `factors.<name>.enabled`; its thresholds live beside that switch in
+`config/default.json`. RTT jitter uses the target list in
+`factors.rtt_inflation.fping_targets` so only one fping invocation is needed.
+
 The three sub-windows are an algorithm invariant and are deliberately not
 configurable. A test requires `config/default.json` to equal
 `RuntimeConfig::default()` exactly, preventing hidden/default drift.
@@ -103,8 +126,9 @@ nothing.
 cargo test
 cargo clippy --all-targets -- -D warnings
 docker build -t vps-bandwidth-observer .
-docker run --rm --network host \
+docker run --rm --network host --cap-add NET_RAW \
   -v /proc:/host-proc:ro \
+  -v /var/run/haproxy:/var/run/haproxy:ro \
   -v "$PWD/config:/app/config:ro" \
   -v "$PWD/state:/app/state" \
   vps-bandwidth-observer

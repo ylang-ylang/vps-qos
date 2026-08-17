@@ -1,5 +1,7 @@
 use std::fs;
-use vps_bandwidth_observer::collector::ProcCollector;
+use vps_bandwidth_observer::collector::{
+    ProcCollector, parse_average_cwnd, parse_fping_output, parse_haproxy_conn_cur,
+};
 
 fn write_proc(root: &std::path::Path, rx: u64, tx: u64, retrans: u64) {
     fs::create_dir_all(root.join("net")).unwrap();
@@ -46,4 +48,23 @@ fn computes_bits_per_second_from_counter_deltas() {
     let sample = collector.sample(12.0).unwrap().unwrap();
     assert_eq!(sample.down_bps, 4_000.0);
     assert_eq!(sample.up_bps, 2_000.0);
+    assert_eq!(sample.down_history_bps, vec![4_000.0]);
+}
+
+#[test]
+fn parses_best_effort_auxiliary_tool_outputs() {
+    assert_eq!(
+        parse_fping_output("8.8.8.8 : 10.1 11.2 -"),
+        vec![10.1, 11.2]
+    );
+    assert_eq!(
+        parse_average_cwnd("cubic wscale:7,7 cwnd:10\n bbr cwnd:30"),
+        Some(20.0)
+    );
+    assert_eq!(
+        parse_haproxy_conn_cur(
+            "# pxname,svname,scur,status\nfront,FRONTEND,2,OPEN\nback,srv,3,UP\n"
+        ),
+        Some(2)
+    );
 }

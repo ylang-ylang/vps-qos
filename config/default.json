@@ -23,5 +23,16 @@
       "initial_state": 0.0,
       "initial_covariance": 1.0
     }
+  },
+  "factors": {
+    "retransmission": { "enabled": true, "min_delta": 1 },
+    "timeout": { "enabled": true, "min_delta": 1 },
+    "zero_window": { "enabled": true, "min_delta": 1 },
+    "rate_stability": { "enabled": false, "window_ticks": 10, "stability_frac": 0.05 },
+    "rate_slope_zero": { "enabled": false, "window_ticks": 10, "slope_threshold": 0.01 },
+    "rtt_inflation": { "enabled": false, "fping_targets": ["8.8.8.8"], "baseline_samples": 20, "inflation_ratio": 1.5 },
+    "rtt_jitter": { "enabled": false, "jitter_ratio": 0.25 },
+    "cwnd_shrink": { "enabled": false, "shrink_ratio": 0.9 },
+    "conn_up_throughput_flat": { "enabled": false, "conn_growth_ratio": 1.1, "haproxy_socket": "/var/run/haproxy/admin.sock" }
   }
 }
