@@ -101,11 +101,13 @@ Every operational parameter is externalized:
 | `rtt_inflation` | disabled | `fping -C 3` samples and rolling baseline | `fping`, network access, normally `NET_RAW` |
 | `rtt_jitter` | disabled | coefficient of variation of the same `fping` samples | `fping`, network access, normally `NET_RAW` |
 | `cwnd_shrink` | disabled | average `cwnd:` parsed from `ss -tiH` | `iproute2` (`ss`), host network namespace |
-| `conn_up_throughput_flat` | disabled | HAProxy `show stat` `scur` total plus rate history | HAProxy admin Unix socket mount |
+| `conn_up_throughput_flat` | disabled | system-wide `/proc/net/sockstat` `TCP: inuse` trend plus the configured `rate_slope_zero` history window/slope threshold | Host procfs mount |
 
 The image includes `fping` and `iproute2`. Optional collectors are best-effort:
-missing tools, inaccessible sockets, or unparseable output produce no factor
-observation rather than terminating the observer. Enable or disable a factor
+missing tools or unparseable output produce no factor observation rather than
+terminating the observer. A missing or malformed `sockstat` connection count is
+recorded as zero; the connection factor treats zero as unavailable and resets
+its history. Enable or disable a factor
 with `factors.<name>.enabled`; its thresholds live beside that switch in
 `config/default.json`. RTT jitter uses the target list in
 `factors.rtt_inflation.fping_targets` so only one fping invocation is needed.
@@ -128,7 +130,6 @@ cargo clippy --all-targets -- -D warnings
 docker build -t vps-bandwidth-observer .
 docker run --rm --network host --cap-add NET_RAW \
   -v /proc:/host-proc:ro \
-  -v /var/run/haproxy:/var/run/haproxy:ro \
   -v "$PWD/config:/app/config:ro" \
   -v "$PWD/state:/app/state" \
   vps-bandwidth-observer
@@ -151,7 +152,6 @@ This includes:
 - Host network and PID namespace (to see real interfaces and processes)
 - `/proc` mount (to read host network/TCP counters)
 - `/var/lib/qos` state persistence
-- `/var/run/haproxy` admin socket (for `ConnUpThroughputFlatFactor`)
 - `/etc/vps-qos` config override directory
 
 Before starting, create the state and config directories and edit the config:

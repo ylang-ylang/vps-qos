@@ -1,10 +1,8 @@
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::io::{self, Read, Write};
-use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::PathBuf;
 use std::process::Command;
 
 const BITS_PER_BYTE: f64 = 8.0;
@@ -17,13 +15,13 @@ pub struct RawCounters {
     pub tcp_timeouts: u64,
     pub to_zero_window_advertisements: u64,
     pub from_zero_window_advertisements: u64,
+    pub tcp_connections: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AuxiliaryMeasurements {
     pub rtt_ms: Option<Vec<f64>>,
     pub average_cwnd: Option<f64>,
-    pub haproxy_conn_cur: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,6 +78,10 @@ impl ProcCollector {
                 .map_err(CollectorError::Read)?,
             "TcpExt",
         )?;
+        let tcp_connections = fs::read_to_string(self.proc_root.join("net/sockstat"))
+            .ok()
+            .and_then(|contents| parse_tcp_connections(&contents))
+            .unwrap_or(0);
         Ok(RawCounters {
             rx_bytes,
             tx_bytes,
@@ -87,6 +89,7 @@ impl ProcCollector {
             tcp_timeouts: field(&netstat, "TCPTimeouts", "TcpExt")?,
             to_zero_window_advertisements: field(&netstat, "TCPToZeroWindowAdv", "TcpExt")?,
             from_zero_window_advertisements: field(&netstat, "TCPFromZeroWindowAdv", "TcpExt")?,
+            tcp_connections,
         })
     }
 
@@ -157,16 +160,6 @@ pub fn collect_average_cwnd() -> Option<f64> {
     parse_average_cwnd(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// Best-effort HAProxy `show stat` query. Socket and parse failures are `None`.
-pub fn collect_haproxy_conn_cur(socket: &Path) -> Option<u64> {
-    let mut stream = UnixStream::connect(socket).ok()?;
-    stream.write_all(b"show stat\n").ok()?;
-    stream.shutdown(Shutdown::Write).ok()?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response).ok()?;
-    parse_haproxy_conn_cur(&response)
-}
-
 pub fn parse_fping_output(output: &str) -> Vec<f64> {
     output
         .lines()
@@ -186,20 +179,21 @@ pub fn parse_average_cwnd(output: &str) -> Option<f64> {
     (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64)
 }
 
-pub fn parse_haproxy_conn_cur(output: &str) -> Option<u64> {
-    let mut lines = output.lines();
-    let header = lines.next()?.trim_start_matches("# ");
-    let columns: Vec<&str> = header.split(',').collect();
-    let scur_index = columns.iter().position(|column| *column == "scur")?;
-    let service_index = columns.iter().position(|column| *column == "svname")?;
-    let frontend_values: Vec<u64> = lines
-        .filter_map(|line| {
-            let fields: Vec<&str> = line.split(',').collect();
-            (fields.get(service_index) == Some(&"FRONTEND"))
-                .then(|| fields.get(scur_index)?.parse::<u64>().ok())?
-        })
+/// Parses the system-wide number of TCP sockets currently in use from
+/// `/proc/net/sockstat`. Unknown or malformed input is intentionally `None` so
+/// the proc collector can treat this optional counter as best-effort.
+pub fn parse_tcp_connections(contents: &str) -> Option<u64> {
+    let fields: Vec<&str> = contents
+        .lines()
+        .find(|line| line.starts_with("TCP:"))?
+        .split_whitespace()
         .collect();
-    (!frontend_values.is_empty()).then(|| frontend_values.into_iter().sum())
+    fields
+        .windows(2)
+        .find(|pair| pair[0] == "inuse")?
+        .get(1)?
+        .parse()
+        .ok()
 }
 
 fn counter_delta(current: u64, previous: u64) -> u64 {

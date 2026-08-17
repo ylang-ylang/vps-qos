@@ -9,6 +9,15 @@ use vps_bandwidth_observer::factors::{
 };
 
 fn counters(retrans: u64, timeout: u64, zero_window: u64) -> RawCounters {
+    counters_with_connections(retrans, timeout, zero_window, 0)
+}
+
+fn counters_with_connections(
+    retrans: u64,
+    timeout: u64,
+    zero_window: u64,
+    tcp_connections: u64,
+) -> RawCounters {
     RawCounters {
         rx_bytes: 0,
         tx_bytes: 0,
@@ -16,6 +25,7 @@ fn counters(retrans: u64, timeout: u64, zero_window: u64) -> RawCounters {
         tcp_timeouts: timeout,
         to_zero_window_advertisements: zero_window,
         from_zero_window_advertisements: 0,
+        tcp_connections,
     }
 }
 fn observe(
@@ -173,28 +183,93 @@ fn cwnd_shrink_compares_consecutive_averages() {
 }
 
 #[test]
-fn growing_connections_with_flat_rate_triggers() {
-    let mut factor = ConnUpThroughputFlatFactor::new(ConnUpThroughputFlatConfig {
-        enabled: true,
-        conn_growth_ratio: 1.1,
-        haproxy_socket: "/unused".into(),
-    });
-    assert!(!observe(
-        &mut factor,
-        &[],
-        &AuxiliaryMeasurements {
-            haproxy_conn_cur: Some(100),
-            ..Default::default()
+fn growing_proc_connections_with_flat_rate_triggers() {
+    let mut factor = ConnUpThroughputFlatFactor::new(
+        ConnUpThroughputFlatConfig {
+            enabled: true,
+            conn_growth_ratio: 1.1,
         },
-        1_000.0
-    ));
-    assert!(observe(
-        &mut factor,
-        &[],
-        &AuxiliaryMeasurements {
-            haproxy_conn_cur: Some(120),
-            ..Default::default()
+        RateSlopeZeroConfig {
+            enabled: false,
+            window_ticks: 3,
+            slope_threshold: 0.01,
         },
-        1_000.0
-    ));
+    );
+    let auxiliary = AuxiliaryMeasurements::default();
+    for (connections, history, expected) in [
+        (100_u64, vec![1_000.0], false),
+        (105_u64, vec![1_000.0, 1_001.0], false),
+        (120_u64, vec![1_000.0, 1_001.0, 1_000.0], true),
+    ] {
+        let previous = counters_with_connections(1, 2, 3, connections.saturating_sub(1));
+        let current = counters_with_connections(2, 2, 4, connections);
+        let report = factor.observe(&FactorInput {
+            previous: &previous,
+            current: &current,
+            value_bps: *history.last().unwrap(),
+            rate_history_bps: &history,
+            auxiliary: &auxiliary,
+        });
+        assert_eq!(report.triggered, expected);
+    }
+}
+
+#[test]
+fn unavailable_proc_connection_count_resets_history() {
+    let mut factor = ConnUpThroughputFlatFactor::new(
+        ConnUpThroughputFlatConfig {
+            enabled: true,
+            conn_growth_ratio: 1.1,
+        },
+        RateSlopeZeroConfig {
+            enabled: false,
+            window_ticks: 2,
+            slope_threshold: 0.01,
+        },
+    );
+    let auxiliary = AuxiliaryMeasurements::default();
+    for connections in [100_u64, 0, 120] {
+        let previous = counters_with_connections(1, 2, 3, connections.saturating_sub(1));
+        let current = counters_with_connections(2, 2, 4, connections);
+        let report = factor.observe(&FactorInput {
+            previous: &previous,
+            current: &current,
+            value_bps: 1_000.0,
+            rate_history_bps: &[1_000.0, 1_000.0],
+            auxiliary: &auxiliary,
+        });
+        assert!(!report.triggered);
+    }
+}
+
+#[test]
+fn growing_proc_connections_with_rising_rate_does_not_trigger() {
+    let mut factor = ConnUpThroughputFlatFactor::new(
+        ConnUpThroughputFlatConfig {
+            enabled: true,
+            conn_growth_ratio: 1.1,
+        },
+        RateSlopeZeroConfig {
+            enabled: false,
+            window_ticks: 3,
+            slope_threshold: 0.01,
+        },
+    );
+    let auxiliary = AuxiliaryMeasurements::default();
+    for (connections, history) in [
+        (100_u64, vec![1_000.0]),
+        (105_u64, vec![1_000.0, 1_200.0]),
+        (120_u64, vec![1_000.0, 1_200.0, 1_400.0]),
+    ] {
+        let previous = counters_with_connections(1, 2, 3, connections.saturating_sub(1));
+        let current = counters_with_connections(2, 2, 4, connections);
+        let report = factor.observe(&FactorInput {
+            previous: &previous,
+            current: &current,
+            value_bps: *history.last().unwrap(),
+            rate_history_bps: &history,
+            auxiliary: &auxiliary,
+        });
+        assert!(!report.triggered);
+    }
 }

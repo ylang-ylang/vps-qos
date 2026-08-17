@@ -137,16 +137,6 @@ fn collect_auxiliary(config: &RuntimeConfig) -> AuxiliaryMeasurements {
             .enabled
             .then(collector::collect_average_cwnd)
             .flatten(),
-        haproxy_conn_cur: config
-            .factors
-            .conn_up_throughput_flat
-            .enabled
-            .then(|| {
-                collector::collect_haproxy_conn_cur(
-                    &config.factors.conn_up_throughput_flat.haproxy_socket,
-                )
-            })
-            .flatten(),
     }
 }
 

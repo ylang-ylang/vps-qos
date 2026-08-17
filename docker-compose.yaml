@@ -16,12 +16,10 @@ services:
     # 挂载点：
     # - /proc: 宿主机的 procfs（只读），让 collector 读到真实的网络/TCP 计数器
     # - /var/lib/qos: 状态持久化目录（窗口化最大值、卡尔曼状态等）
-    # - /var/run/haproxy: HAProxy admin socket（只读，如果要启用 ConnUpThroughputFlatFactor）
     # - /etc/vps-qos: 配置文件目录（可覆盖默认配置）
     volumes:
       - /proc:/host/proc:ro
       - /var/lib/qos:/app/state
-      - /var/run/haproxy:/var/run/haproxy:ro
       - /etc/vps-qos:/app/config:ro
     
     # 环境变量（可选，覆盖配置文件里的值）

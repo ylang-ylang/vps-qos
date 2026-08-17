@@ -1,6 +1,6 @@
 use std::fs;
 use vps_bandwidth_observer::collector::{
-    ProcCollector, parse_average_cwnd, parse_fping_output, parse_haproxy_conn_cur,
+    ProcCollector, parse_average_cwnd, parse_fping_output, parse_tcp_connections,
 };
 
 fn write_proc(root: &std::path::Path, rx: u64, tx: u64, retrans: u64) {
@@ -22,6 +22,11 @@ fn write_proc(root: &std::path::Path, rx: u64, tx: u64, retrans: u64) {
         "TcpExt: TCPTimeouts TCPToZeroWindowAdv TCPFromZeroWindowAdv\nTcpExt: 7 8 9\n",
     )
     .unwrap();
+    fs::write(
+        root.join("net/sockstat"),
+        "sockets: used 600\nTCP: inuse 567 orphan 0 tw 89 alloc 580 mem 12\nUDP: inuse 4 mem 1\n",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -36,6 +41,7 @@ fn reads_synthetic_proc_counters() {
     assert_eq!(counters.tcp_timeouts, 7);
     assert_eq!(counters.to_zero_window_advertisements, 8);
     assert_eq!(counters.from_zero_window_advertisements, 9);
+    assert_eq!(counters.tcp_connections, 567);
 }
 
 #[test]
@@ -52,6 +58,22 @@ fn computes_bits_per_second_from_counter_deltas() {
 }
 
 #[test]
+fn missing_or_malformed_sockstat_is_best_effort_zero() {
+    let temp = tempfile::tempdir().unwrap();
+    write_proc(temp.path(), 1_000, 2_000, 6);
+    fs::remove_file(temp.path().join("net/sockstat")).unwrap();
+    let collector = ProcCollector::new(temp.path(), "eth0");
+    assert_eq!(collector.read_counters().unwrap().tcp_connections, 0);
+
+    fs::write(
+        temp.path().join("net/sockstat"),
+        "TCP: inuse nope orphan 0\n",
+    )
+    .unwrap();
+    assert_eq!(collector.read_counters().unwrap().tcp_connections, 0);
+}
+
+#[test]
 fn parses_best_effort_auxiliary_tool_outputs() {
     assert_eq!(
         parse_fping_output("8.8.8.8 : 10.1 11.2 -"),
@@ -62,9 +84,8 @@ fn parses_best_effort_auxiliary_tool_outputs() {
         Some(20.0)
     );
     assert_eq!(
-        parse_haproxy_conn_cur(
-            "# pxname,svname,scur,status\nfront,FRONTEND,2,OPEN\nback,srv,3,UP\n"
-        ),
-        Some(2)
+        parse_tcp_connections("TCP: inuse 567 orphan 0 tw 89 alloc 580 mem 12\n"),
+        Some(567)
     );
+    assert_eq!(parse_tcp_connections("UDP: inuse 4 mem 1\n"), None);
 }

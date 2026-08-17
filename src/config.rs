@@ -109,7 +109,6 @@ pub struct CwndShrinkConfig {
 pub struct ConnUpThroughputFlatConfig {
     pub enabled: bool,
     pub conn_growth_ratio: f64,
-    pub haproxy_socket: PathBuf,
 }
 
 fn default_comment() -> String {
@@ -235,7 +234,6 @@ impl Default for ConnUpThroughputFlatConfig {
         Self {
             enabled: false,
             conn_growth_ratio: 1.1,
-            haproxy_socket: PathBuf::from("/var/run/haproxy/admin.sock"),
         }
     }
 }
@@ -292,17 +290,6 @@ impl FactorsConfig {
             "conn_up_throughput_flat.conn_growth_ratio",
             self.conn_up_throughput_flat.conn_growth_ratio,
         )?;
-        if self.conn_up_throughput_flat.enabled
-            && self
-                .conn_up_throughput_flat
-                .haproxy_socket
-                .as_os_str()
-                .is_empty()
-        {
-            return Err(ConfigError::Invalid(
-                "conn_up_throughput_flat.haproxy_socket must not be empty when enabled".to_owned(),
-            ));
-        }
         Ok(())
     }
 }

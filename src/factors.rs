@@ -62,6 +62,7 @@ pub fn all_factors(config: &FactorsConfig) -> Vec<Box<dyn Factor>> {
     if config.conn_up_throughput_flat.enabled {
         factors.push(Box::new(ConnUpThroughputFlatFactor::new(
             config.conn_up_throughput_flat.clone(),
+            config.rate_slope_zero.clone(),
         )));
     }
     factors
@@ -264,13 +265,15 @@ impl Factor for CwndShrinkFactor {
 
 pub struct ConnUpThroughputFlatFactor {
     config: ConnUpThroughputFlatConfig,
-    previous: Option<(u64, f64)>,
+    rate_config: RateSlopeZeroConfig,
+    connection_history: VecDeque<u64>,
 }
 impl ConnUpThroughputFlatFactor {
-    pub fn new(config: ConnUpThroughputFlatConfig) -> Self {
+    pub fn new(config: ConnUpThroughputFlatConfig, rate_config: RateSlopeZeroConfig) -> Self {
         Self {
             config,
-            previous: None,
+            rate_config,
+            connection_history: VecDeque::new(),
         }
     }
 }
@@ -279,19 +282,32 @@ impl Factor for ConnUpThroughputFlatFactor {
         "conn_up_throughput_flat"
     }
     fn observe(&mut self, input: &FactorInput<'_>) -> FactorObservation {
-        let current_connections = input.auxiliary.haproxy_conn_cur;
-        let triggered = current_connections.zip(self.previous).is_some_and(
-            |(connections, (previous_connections, previous_rate))| {
-                previous_connections > 0
-                    && connections as f64
-                        >= previous_connections as f64 * self.config.conn_growth_ratio
-                    && input.value_bps <= previous_rate
-            },
-        );
-        if let Some(connections) = current_connections {
-            self.previous = Some((connections, input.value_bps));
+        if input.current.tcp_connections == 0 {
+            self.connection_history.clear();
+            return report(self.name(), false, input.value_bps);
         }
-        report(self.name(), triggered, input.value_bps)
+        self.connection_history
+            .push_back(input.current.tcp_connections);
+        while self.connection_history.len() > self.rate_config.window_ticks {
+            self.connection_history.pop_front();
+        }
+
+        let connections_growing = (self.connection_history.len() >= self.rate_config.window_ticks)
+            .then(|| {
+                let first = *self.connection_history.front()?;
+                let last = *self.connection_history.back()?;
+                Some(first > 0 && last as f64 >= first as f64 * self.config.conn_growth_ratio)
+            })
+            .flatten()
+            .unwrap_or(false);
+        let rate_flat = tail(input.rate_history_bps, self.rate_config.window_ticks)
+            .map(|values| normalized_slope(values).abs() <= self.rate_config.slope_threshold)
+            .unwrap_or(false);
+        report(
+            self.name(),
+            connections_growing && rate_flat,
+            input.value_bps,
+        )
     }
 }
 
