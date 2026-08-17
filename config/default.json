@@ -34,5 +34,10 @@
     "rtt_jitter": { "enabled": false, "jitter_ratio": 0.25 },
     "cwnd_shrink": { "enabled": false, "shrink_ratio": 0.9 },
     "conn_up_throughput_flat": { "enabled": false, "conn_growth_ratio": 1.1 }
+  },
+  "web": {
+    "enabled": true,
+    "port": 8080,
+    "history_ticks": 300
   }
 }

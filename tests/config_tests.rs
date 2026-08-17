@@ -21,6 +21,22 @@ fn nominal_ceiling_is_required() {
 }
 
 #[test]
+fn web_defaults_are_applied_when_group_is_omitted() {
+    let parsed: RuntimeConfig =
+        serde_json::from_str(r#"{"required":{"nominal_ceiling_bps":200000000.0}}"#).unwrap();
+    assert!(parsed.web.enabled);
+    assert_eq!(parsed.web.port, 8080);
+    assert_eq!(parsed.web.history_ticks, 300);
+}
+
+#[test]
+fn invalid_web_history_is_rejected() {
+    let mut config = RuntimeConfig::default();
+    config.web.history_ticks = 0;
+    assert!(config.validate().is_err());
+}
+
+#[test]
 fn unknown_factor_name_is_rejected() {
     let error = serde_json::from_str::<RuntimeConfig>(
         r#"{"required":{"nominal_ceiling_bps":200000000.0},"factors":{"retransmision":{"enabled":true,"min_delta":1}}}"#,

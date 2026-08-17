@@ -9,6 +9,7 @@ use vps_bandwidth_observer::factors;
 use vps_bandwidth_observer::kalman::CongestionKalman;
 use vps_bandwidth_observer::policy::select_ceiling_bps;
 use vps_bandwidth_observer::state::ObserverState;
+use vps_bandwidth_observer::web::{self, MetricsPoint, MetricsStore};
 
 #[derive(Serialize)]
 struct Output<'a> {
@@ -22,6 +23,7 @@ struct Output<'a> {
     congestion_up: f64,
     estimate_down_bps: f64,
     estimate_up_bps: f64,
+    triggered_factors: &'a [String],
     counters: &'a RawCounters,
 }
 
@@ -55,6 +57,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut down_factors = factors::all_factors(&config.factors);
     let mut up_factors = factors::all_factors(&config.factors);
     let interval = Duration::from_secs_f64(window.sample_interval_seconds);
+    let metrics_store = config
+        .web
+        .enabled
+        .then(|| MetricsStore::new(config.web.history_ticks));
+    let _web_thread = metrics_store
+        .as_ref()
+        .map(|store| web::spawn(config.web.port, store.clone()))
+        .transpose()?;
 
     loop {
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
@@ -105,6 +115,14 @@ fn run() -> Result<(), Box<dyn Error>> {
                 nominal_ceiling_bps,
                 window_max_up_bps,
             );
+            let mut triggered_factors: Vec<String> = reports_down
+                .iter()
+                .chain(&reports_up)
+                .filter(|report| report.triggered)
+                .map(|report| report.name.clone())
+                .collect();
+            triggered_factors.sort_unstable();
+            triggered_factors.dedup();
             let output = Output {
                 channel_id: &state.channel_id,
                 timestamp: sample.timestamp,
@@ -116,8 +134,21 @@ fn run() -> Result<(), Box<dyn Error>> {
                 congestion_up,
                 estimate_down_bps,
                 estimate_up_bps,
+                triggered_factors: &triggered_factors,
                 counters: &sample.counters,
             };
+            if let Some(store) = &metrics_store {
+                store.push(MetricsPoint {
+                    timestamp: sample.timestamp,
+                    estimate_down_bps,
+                    estimate_up_bps,
+                    congestion_down,
+                    congestion_up,
+                    window_max_down_bps,
+                    window_max_up_bps,
+                    triggered_factors: triggered_factors.clone(),
+                });
+            }
             println!("{}", serde_json::to_string(&output)?);
             state.save_atomic(&window.state_path)?;
         }

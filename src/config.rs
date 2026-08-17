@@ -18,6 +18,8 @@ pub struct RuntimeConfig {
     pub congestion_detection: CongestionDetectionConfig,
     #[serde(default)]
     pub factors: FactorsConfig,
+    #[serde(default)]
+    pub web: WebConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,6 +113,14 @@ pub struct ConnUpThroughputFlatConfig {
     pub conn_growth_ratio: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebConfig {
+    pub enabled: bool,
+    pub port: u16,
+    pub history_ticks: usize,
+}
+
 fn default_comment() -> String {
     CONFIG_COMMENT.to_owned()
 }
@@ -123,6 +133,7 @@ impl Default for RuntimeConfig {
             windowed_max_filter: WindowedMaxFilterConfig::default(),
             congestion_detection: CongestionDetectionConfig::default(),
             factors: FactorsConfig::default(),
+            web: WebConfig::default(),
         }
     }
 }
@@ -237,6 +248,15 @@ impl Default for ConnUpThroughputFlatConfig {
         }
     }
 }
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: 8080,
+            history_ticks: 300,
+        }
+    }
+}
 
 impl FactorsConfig {
     fn validate(&self) -> Result<(), ConfigError> {
@@ -346,7 +366,18 @@ impl RuntimeConfig {
             .kalman
             .validate()
             .map_err(|error| ConfigError::Invalid(error.to_string()))?;
-        self.factors.validate()
+        self.factors.validate()?;
+        if self.web.enabled && self.web.port == 0 {
+            return Err(ConfigError::Invalid(
+                "web.port must be greater than zero when web is enabled".to_owned(),
+            ));
+        }
+        if self.web.history_ticks == 0 {
+            return Err(ConfigError::Invalid(
+                "web.history_ticks must be greater than zero".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 

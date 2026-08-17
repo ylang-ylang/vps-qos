@@ -66,6 +66,7 @@ Run with `vps-bandwidth-observer [CONFIG_PATH]`; the default path is
 - `congestion_detection`: optional policy threshold and Kalman overrides.
 - `factors`: per-factor enable switches and trigger parameters. Unknown factor
   names or fields are rejected so spelling errors cannot silently disable a signal.
+- `web`: built-in dashboard enable switch, HTTP port, and retained history size.
 - `_comment`: operator-facing documentation; ignored by runtime behavior.
 
 Every operational parameter is externalized:
@@ -88,6 +89,9 @@ Every operational parameter is externalized:
 | `congestion_detection.kalman.maximum_measurement_noise` | 1 | Upper variance bound. |
 | `congestion_detection.kalman.initial_state` | 0 | Initial congestion state. |
 | `congestion_detection.kalman.initial_covariance` | 1 | Initial state uncertainty. |
+| `web.enabled` | true | Starts the built-in HTTP dashboard when enabled. |
+| `web.port` | 8080 | Dashboard listen port on all interfaces. |
+| `web.history_ticks` | 300 | In-memory ring-buffer capacity; at the default two-second cadence this retains ten minutes. |
 
 ### Factor data sources and deployment requirements
 
@@ -122,6 +126,21 @@ congestion states and selected ceilings, channel/timestamp, and raw TCP
 counters. The first collection establishes a counter baseline and emits
 nothing.
 
+## Built-in web dashboard
+
+With `web.enabled` set to `true`, open `http://<vps-address>:8080/` (or the
+configured `web.port`). The single-page dashboard displays current up/down
+estimates and congestion states, a retained download/congestion chart, and
+recent factor triggers. It polls `GET /api/metrics` every two seconds. Metrics
+history is memory-only and bounded by `web.history_ticks`; restarting the
+process clears it. Chart.js is loaded from jsDelivr, so the charts require the
+browser to reach that CDN, while the JSON API and current values are served
+entirely by vps-qos.
+
+When using the provided host-network Docker Compose deployment, no `ports:`
+mapping is required; allow the configured TCP port through the VPS firewall if
+remote dashboard access is desired.
+
 ## Build and verify
 
 ```sh
@@ -133,6 +152,8 @@ docker run --rm --network host --cap-add NET_RAW \
   -v "$PWD/config:/app/config:ro" \
   -v "$PWD/state:/app/state" \
   vps-bandwidth-observer
+# Dashboard: http://localhost:8080/
+# JSON API: curl http://localhost:8080/api/metrics
 ```
 
 For a container, set `proc_root` to `/host-proc` in the mounted configuration.
