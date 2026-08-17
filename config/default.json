@@ -1,20 +1,27 @@
 {
-  "window_seconds": 60.0,
-  "sample_interval_seconds": 2.0,
-  "state_path": "state/window.json",
-  "channel_id": "default",
-  "interface": "eth0",
-  "proc_root": "/proc",
-  "nominal_ceiling_bps": 200000000.0,
-  "congestion_threshold": 0.7,
-  "kalman": {
-    "process_noise_per_second": 0.005,
-    "mean_reversion_per_second": 0.01,
-    "initial_measurement_noise": 0.1,
-    "measurement_noise_learning_rate": 0.1,
-    "minimum_measurement_noise": 0.001,
-    "maximum_measurement_noise": 1.0,
-    "initial_state": 0.0,
-    "initial_covariance": 1.0
+  "_comment": "VPS bandwidth observer configuration. nominal_ceiling_bps is REQUIRED and must match your VPS's advertised bandwidth. All other fields have sensible defaults and are optional overrides.",
+  "required": {
+    "nominal_ceiling_bps": 200000000.0
+  },
+  "windowed_max_filter": {
+    "window_seconds": 60.0,
+    "sample_interval_seconds": 2.0,
+    "state_path": "state/window.json",
+    "channel_id": "default",
+    "interface": "eth0",
+    "proc_root": "/proc"
+  },
+  "congestion_detection": {
+    "congestion_threshold": 0.7,
+    "kalman": {
+      "process_noise_per_second": 0.005,
+      "mean_reversion_per_second": 0.01,
+      "initial_measurement_noise": 0.1,
+      "measurement_noise_learning_rate": 0.1,
+      "minimum_measurement_noise": 0.001,
+      "maximum_measurement_noise": 1.0,
+      "initial_state": 0.0,
+      "initial_covariance": 1.0
+    }
   }
 }

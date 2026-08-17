@@ -26,6 +26,12 @@ counter deltas are exposed as uniform boolean factor reports carrying the
 current direction's rate; no factor has a hard-coded priority or initial
 weight.
 
+Factors are modular. Each signal is an independent `Factor` implementation in
+`src/factors.rs`; `all_factors()` constructs the production registry, and
+`observe_all()` evaluates any supplied registry without policy or priority.
+To add a factor, implement the trait and register one instance in
+`all_factors()`; the collector, Kalman fusion, and main loop require no changes.
+
 ## Kalman congestion fusion and selected ceiling
 
 The maximum filter and Kalman layer solve different problems. The maximum
@@ -50,26 +56,36 @@ both congestion states, and both selected ceilings.
 ## Configuration
 
 Run with `vps-bandwidth-observer [CONFIG_PATH]`; the default path is
-`config/default.json`. Every operational parameter is externalized there:
+`config/default.json`. The file is grouped by operator responsibility:
 
-| Field | Default | Meaning/source |
+- `required`: deployment-specific input. `nominal_ceiling_bps` has no serde
+  fallback and configuration loading fails if this section is omitted. Change
+  the checked-in example to match the advertised ceiling of the target VPS.
+- `windowed_max_filter`: optional observer, procfs, state, and sampling
+  overrides.
+- `congestion_detection`: optional policy threshold and Kalman overrides.
+- `_comment`: operator-facing documentation; ignored by runtime behavior.
+
+Every operational parameter is externalized:
+
+| Field | Example/default | Meaning/source |
 |---|---:|---|
-| `window_seconds` | 60 | Total retention horizon. It is time-based because the process observes an interface rather than per-flow RTT rounds. |
-| `sample_interval_seconds` | 2 | `/proc` sampling cadence; preserves the requested deployment cadence. |
-| `state_path` | `state/window.json` | Atomic JSON snapshot destination. |
-| `channel_id` | `default` | Output/state identity reserved for future channel routing. |
-| `interface` | `eth0` | Interface row selected in `/proc/net/dev`. |
-| `proc_root` | `/proc` | Procfs root; injectable for tests and container deployments. |
-| `nominal_ceiling_bps` | 200000000 | Operator-provided VPS ceiling used for normalization and uncongested output. |
-| `congestion_threshold` | 0.7 | Congestion state above which the recent maximum is selected. |
-| `kalman.process_noise_per_second` | 0.005 | Random-walk covariance growth rate. |
-| `kalman.mean_reversion_per_second` | 0.01 | Per-second recovery toward no congestion when no evidence reinforces the state. |
-| `kalman.initial_measurement_noise` | 0.1 | Equal starting measurement variance for every factor. |
-| `kalman.measurement_noise_learning_rate` | 0.1 | Squared-innovation variance adaptation rate. |
-| `kalman.minimum_measurement_noise` | 0.001 | Lower variance bound. |
-| `kalman.maximum_measurement_noise` | 1 | Upper variance bound. |
-| `kalman.initial_state` | 0 | Initial congestion state. |
-| `kalman.initial_covariance` | 1 | Initial state uncertainty. |
+| `required.nominal_ceiling_bps` | 200000000 | **Required** operator-provided VPS ceiling used for normalization and uncongested output. |
+| `windowed_max_filter.window_seconds` | 60 | Total retention horizon. It is time-based because the process observes an interface rather than per-flow RTT rounds. |
+| `windowed_max_filter.sample_interval_seconds` | 2 | `/proc` sampling cadence; preserves the requested deployment cadence. |
+| `windowed_max_filter.state_path` | `state/window.json` | Atomic JSON snapshot destination. |
+| `windowed_max_filter.channel_id` | `default` | Output/state identity reserved for future channel routing. |
+| `windowed_max_filter.interface` | `eth0` | Interface row selected in `/proc/net/dev`. |
+| `windowed_max_filter.proc_root` | `/proc` | Procfs root; injectable for tests and container deployments. |
+| `congestion_detection.congestion_threshold` | 0.7 | Congestion state above which the recent maximum is selected. |
+| `congestion_detection.kalman.process_noise_per_second` | 0.005 | Random-walk covariance growth rate. |
+| `congestion_detection.kalman.mean_reversion_per_second` | 0.01 | Per-second recovery toward no congestion when no evidence reinforces the state. |
+| `congestion_detection.kalman.initial_measurement_noise` | 0.1 | Equal starting measurement variance for every factor. |
+| `congestion_detection.kalman.measurement_noise_learning_rate` | 0.1 | Squared-innovation variance adaptation rate. |
+| `congestion_detection.kalman.minimum_measurement_noise` | 0.001 | Lower variance bound. |
+| `congestion_detection.kalman.maximum_measurement_noise` | 1 | Upper variance bound. |
+| `congestion_detection.kalman.initial_state` | 0 | Initial congestion state. |
+| `congestion_detection.kalman.initial_covariance` | 1 | Initial state uncertainty. |
 
 The three sub-windows are an algorithm invariant and are deliberately not
 configurable. A test requires `config/default.json` to equal

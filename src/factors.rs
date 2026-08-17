@@ -1,47 +1,115 @@
 use crate::collector::RawCounters;
 use crate::kalman::FactorObservation;
 
-/// Stateless delta factors over consecutive cumulative kernel snapshots.
-/// Every factor is emitted in the same representation and has no priority or
-/// special handling in the fusion layer. Call once per traffic direction with
-/// that direction's current rate.
-pub fn observe(
+/// Uniform interface implemented by every congestion signal. Factors are
+/// stateless, independently evaluated, and receive no priority or weight.
+pub trait Factor {
+    fn name(&self) -> &'static str;
+
+    fn observe(
+        &self,
+        previous: &RawCounters,
+        current: &RawCounters,
+        value_bps: f64,
+    ) -> FactorObservation;
+}
+
+/// Constructs the production factor registry. Add a new factor implementation
+/// below, then register one instance here; the collector and fusion code need
+/// no changes.
+pub fn all_factors() -> Vec<Box<dyn Factor>> {
+    vec![
+        Box::new(RetransmissionFactor),
+        Box::new(TimeoutFactor),
+        Box::new(ZeroWindowFactor),
+    ]
+}
+
+/// Evaluates any supplied registry and preserves its order.
+pub fn observe_all(
+    factors: &[Box<dyn Factor>],
     previous: &RawCounters,
     current: &RawCounters,
     value_bps: f64,
 ) -> Vec<FactorObservation> {
-    vec![
+    factors
+        .iter()
+        .map(|factor| factor.observe(previous, current, value_bps))
+        .collect()
+}
+
+pub struct RetransmissionFactor;
+
+impl Factor for RetransmissionFactor {
+    fn name(&self) -> &'static str {
+        "retransmission"
+    }
+
+    fn observe(
+        &self,
+        previous: &RawCounters,
+        current: &RawCounters,
+        value_bps: f64,
+    ) -> FactorObservation {
         FactorObservation::new(
-            "retransmission",
+            self.name(),
             increased(
                 current.retransmitted_segments,
                 previous.retransmitted_segments,
             ),
             value_bps,
-        ),
+        )
+    }
+}
+
+pub struct TimeoutFactor;
+
+impl Factor for TimeoutFactor {
+    fn name(&self) -> &'static str {
+        "timeout"
+    }
+
+    fn observe(
+        &self,
+        previous: &RawCounters,
+        current: &RawCounters,
+        value_bps: f64,
+    ) -> FactorObservation {
         FactorObservation::new(
-            "timeout",
+            self.name(),
             increased(current.tcp_timeouts, previous.tcp_timeouts),
             value_bps,
-        ),
+        )
+    }
+}
+
+pub struct ZeroWindowFactor;
+
+impl Factor for ZeroWindowFactor {
+    fn name(&self) -> &'static str {
+        "zero_window"
+    }
+
+    fn observe(
+        &self,
+        previous: &RawCounters,
+        current: &RawCounters,
+        value_bps: f64,
+    ) -> FactorObservation {
         FactorObservation::new(
-            "zero_window",
-            zero_window_increased(previous, current),
+            self.name(),
+            increased(
+                current.to_zero_window_advertisements,
+                previous.to_zero_window_advertisements,
+            ) || increased(
+                current.from_zero_window_advertisements,
+                previous.from_zero_window_advertisements,
+            ),
             value_bps,
-        ),
-    ]
+        )
+    }
 }
 
 fn increased(current: u64, previous: u64) -> bool {
     current.saturating_sub(previous) > 0
-}
-
-fn zero_window_increased(previous: &RawCounters, current: &RawCounters) -> bool {
-    increased(
-        current.to_zero_window_advertisements,
-        previous.to_zero_window_advertisements,
-    ) || increased(
-        current.from_zero_window_advertisements,
-        previous.from_zero_window_advertisements,
-    )
 }

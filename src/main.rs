@@ -37,11 +37,15 @@ fn run() -> Result<(), Box<dyn Error>> {
         .nth(1)
         .unwrap_or_else(|| "config/default.json".to_owned());
     let config = RuntimeConfig::load(config_path)?;
+    let window = &config.windowed_max_filter;
+    let congestion = &config.congestion_detection;
+    let nominal_ceiling_bps = config.required.nominal_ceiling_bps;
     let mut state = restore_or_create(&config)?;
-    let mut collector = ProcCollector::new(&config.proc_root, &config.interface);
-    let mut down_congestion = CongestionKalman::new(config.kalman.clone())?;
-    let mut up_congestion = CongestionKalman::new(config.kalman.clone())?;
-    let interval = Duration::from_secs_f64(config.sample_interval_seconds);
+    let mut collector = ProcCollector::new(&window.proc_root, &window.interface);
+    let mut down_congestion = CongestionKalman::new(congestion.kalman.clone())?;
+    let mut up_congestion = CongestionKalman::new(congestion.kalman.clone())?;
+    let factor_registry = factors::all_factors();
+    let interval = Duration::from_secs_f64(window.sample_interval_seconds);
 
     loop {
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
@@ -51,29 +55,40 @@ fn run() -> Result<(), Box<dyn Error>> {
             let window_max_up_bps = state.up_max.feed(sample.up_bps, sample.timestamp)?;
             let reports_down = previous_counters
                 .as_ref()
-                .map(|previous| factors::observe(previous, &sample.counters, sample.down_bps))
+                .map(|previous| {
+                    factors::observe_all(
+                        &factor_registry,
+                        previous,
+                        &sample.counters,
+                        sample.down_bps,
+                    )
+                })
                 .unwrap_or_default();
             let reports_up = previous_counters
                 .as_ref()
-                .map(|previous| factors::observe(previous, &sample.counters, sample.up_bps))
+                .map(|previous| {
+                    factors::observe_all(
+                        &factor_registry,
+                        previous,
+                        &sample.counters,
+                        sample.up_bps,
+                    )
+                })
                 .unwrap_or_default();
-            let congestion_down = down_congestion.process(
-                sample.timestamp,
-                config.nominal_ceiling_bps,
-                &reports_down,
-            )?;
+            let congestion_down =
+                down_congestion.process(sample.timestamp, nominal_ceiling_bps, &reports_down)?;
             let congestion_up =
-                up_congestion.process(sample.timestamp, config.nominal_ceiling_bps, &reports_up)?;
+                up_congestion.process(sample.timestamp, nominal_ceiling_bps, &reports_up)?;
             let estimate_down_bps = select_ceiling_bps(
                 congestion_down,
-                config.congestion_threshold,
-                config.nominal_ceiling_bps,
+                congestion.congestion_threshold,
+                nominal_ceiling_bps,
                 window_max_down_bps,
             );
             let estimate_up_bps = select_ceiling_bps(
                 congestion_up,
-                config.congestion_threshold,
-                config.nominal_ceiling_bps,
+                congestion.congestion_threshold,
+                nominal_ceiling_bps,
                 window_max_up_bps,
             );
             let output = Output {
@@ -90,25 +105,26 @@ fn run() -> Result<(), Box<dyn Error>> {
                 counters: &sample.counters,
             };
             println!("{}", serde_json::to_string(&output)?);
-            state.save_atomic(&config.state_path)?;
+            state.save_atomic(&window.state_path)?;
         }
         thread::sleep(interval);
     }
 }
 
 fn restore_or_create(config: &RuntimeConfig) -> Result<ObserverState, Box<dyn Error>> {
-    if let Some(state) = ObserverState::load(&config.state_path)?
-        && state.channel_id == config.channel_id
+    let window = &config.windowed_max_filter;
+    if let Some(state) = ObserverState::load(&window.state_path)?
+        && state.channel_id == window.channel_id
         && state.down_max.kind() == Extremum::Max
         && state.up_max.kind() == Extremum::Max
-        && state.down_max.window_seconds() == config.window_seconds
-        && state.up_max.window_seconds() == config.window_seconds
+        && state.down_max.window_seconds() == window.window_seconds
+        && state.up_max.window_seconds() == window.window_seconds
     {
         return Ok(state);
     }
     Ok(ObserverState {
-        channel_id: config.channel_id.clone(),
-        down_max: WindowedExtremum::max(config.window_seconds)?,
-        up_max: WindowedExtremum::max(config.window_seconds)?,
+        channel_id: window.channel_id.clone(),
+        down_max: WindowedExtremum::max(window.window_seconds)?,
+        up_max: WindowedExtremum::max(window.window_seconds)?,
     })
 }

@@ -13,8 +13,9 @@ fn counters(retrans: u64, timeout: u64, zero_window: u64) -> RawCounters {
 }
 
 #[test]
-fn factors_are_uniform_boolean_reports_with_current_speed() {
-    let reports = factors::observe(&counters(1, 2, 3), &counters(2, 2, 4), 42_000.0);
+fn registry_factors_are_uniform_boolean_reports_with_current_speed() {
+    let registry = factors::all_factors();
+    let reports = factors::observe_all(&registry, &counters(1, 2, 3), &counters(2, 2, 4), 42_000.0);
     assert_eq!(reports.len(), 3);
     assert!(reports.iter().all(|report| report.value_bps == 42_000.0));
     assert_eq!(reports[0].name, "retransmission");

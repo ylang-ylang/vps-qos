@@ -8,7 +8,14 @@ fn checked_in_json_exactly_matches_rust_defaults() {
 }
 
 #[test]
-fn serde_defaults_fill_omitted_fields() {
-    let parsed: RuntimeConfig = serde_json::from_str("{}").unwrap();
+fn optional_groups_default_when_required_input_is_present() {
+    let parsed: RuntimeConfig =
+        serde_json::from_str(r#"{"required":{"nominal_ceiling_bps":200000000.0}}"#).unwrap();
     assert_eq!(parsed, RuntimeConfig::default());
+}
+
+#[test]
+fn nominal_ceiling_is_required() {
+    let error = serde_json::from_str::<RuntimeConfig>("{}").unwrap_err();
+    assert!(error.to_string().contains("required"));
 }
