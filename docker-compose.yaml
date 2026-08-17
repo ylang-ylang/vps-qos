@@ -1,0 +1,44 @@
+services:
+  vps-qos:
+    image: ylangylang/vps-qos:latest
+    container_name: vps-qos
+    restart: unless-stopped
+    
+    # 网络权限：fping (NET_RAW) 和 ss -ti (NET_ADMIN) 需要
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    
+    # 网络和 PID 命名空间：让容器看到宿主机的真实接口和进程
+    network_mode: host
+    pid: host
+    
+    # 挂载点：
+    # - /proc: 宿主机的 procfs（只读），让 collector 读到真实的网络/TCP 计数器
+    # - /var/lib/qos: 状态持久化目录（窗口化最大值、卡尔曼状态等）
+    # - /var/run/haproxy: HAProxy admin socket（只读，如果要启用 ConnUpThroughputFlatFactor）
+    # - /etc/vps-qos: 配置文件目录（可覆盖默认配置）
+    volumes:
+      - /proc:/host/proc:ro
+      - /var/lib/qos:/app/state
+      - /var/run/haproxy:/var/run/haproxy:ro
+      - /etc/vps-qos:/app/config:ro
+    
+    # 环境变量（可选，覆盖配置文件里的值）
+    environment:
+      - TZ=Asia/Shanghai
+    
+    # 日志驱动（限制日志大小，防止磁盘占满）
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # 健康检查（可选）：检查进程是否还在运行
+    healthcheck:
+      test: ["CMD", "test", "-f", "/app/state/window.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
