@@ -137,3 +137,34 @@ docker run --rm --network host --cap-add NET_RAW \
 For a container, set `proc_root` to `/host-proc` in the mounted configuration.
 The observer must see the host interface counters; host networking alone does
 not replace the procfs mount.
+
+## Docker Compose deployment
+
+A `docker-compose.yaml` is provided with all required permissions and mounts:
+
+```bash
+docker compose up -d
+```
+
+This includes:
+- `NET_RAW` and `NET_ADMIN` capabilities (for `fping` and `ss -ti`)
+- Host network and PID namespace (to see real interfaces and processes)
+- `/proc` mount (to read host network/TCP counters)
+- `/var/lib/qos` state persistence
+- `/var/run/haproxy` admin socket (for `ConnUpThroughputFlatFactor`)
+- `/etc/vps-qos` config override directory
+
+Before starting, create the state and config directories and edit the config:
+
+```bash
+sudo mkdir -p /var/lib/qos /etc/vps-qos
+sudo cp config/default.json /etc/vps-qos/default.json
+# Edit /etc/vps-qos/default.json: set required.nominal_ceiling_bps and enable desired factors
+```
+
+Then start with:
+
+```bash
+docker compose up -d
+docker compose logs -f
+```
